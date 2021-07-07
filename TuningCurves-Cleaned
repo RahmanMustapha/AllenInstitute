@@ -1,0 +1,345 @@
+#Imports
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+%matplotlib inline
+import os
+import scipy.stats as st
+
+#pd.set_option("display.max_rows", None, "display.max_columns", None)
+pd.reset_option('all')
+
+from allensdk.core.brain_observatory_cache import BrainObservatoryCache
+import pprint
+import allensdk.brain_observatory.stimulus_info as stim_info
+from allensdk.brain_observatory.drifting_gratings import DriftingGratings
+
+
+
+boc = BrainObservatoryCache()
+
+exp_test = boc.get_ophys_experiments(cre_lines=['Vip-IRES-Cre'], stimuli=['drifting_gratings'], 
+                                     targeted_structures=['VISp'])
+print("Experiments for test: %d\n" % (len(exp_test)))
+
+session_id0 = exp_test[0]['id']
+print(session_id0)
+
+data_set0 = boc.get_ophys_experiment_data(session_id0)
+pprint.pprint(data_set0.get_metadata())
+
+#Stimulus Table
+drifting_gratings_table0 = data_set0.get_stimulus_table("drifting_gratings")
+drifting_gratings_table0
+
+
+
+vip_inter_ecs = boc.get_experiment_containers(targeted_structures=['VISp'],cre_lines=['Vip-IRES-Cre'])
+# Download cells for a set of experiments and convert to DataFrame
+cells = boc.get_cell_specimens()
+cells = pd.DataFrame.from_records(cells)
+print("total cells: %d" % len(cells))
+
+# find direction selective cells in VISp
+vip_inter_ec_ids = [ ec['id'] for ec in vip_inter_ecs ]
+vip_inter_cells = cells[cells['experiment_container_id'].isin(vip_inter_ec_ids)]
+print("VIP Interneuron cells: %d" % len(vip_inter_cells))
+
+# significant response to drifting gratings stimulus
+sig_cells = vip_inter_cells[vip_inter_cells['p_dg'] < 0.05]
+print("cells with sig. response to drifting gratings: %d" % len(sig_cells))
+
+# direction selective cells
+dsi_cells = sig_cells[(sig_cells['g_dsi_dg'] > 0.9)]
+print("direction-selective cells: %d" % len(dsi_cells))
+
+# find experiment containers for those cells
+dsi_ec_ids = dsi_cells['experiment_container_id'].unique()
+print("total dsi experiment containers: %d" % len(dsi_ec_ids))
+
+# Download the ophys experiments containing the drifting gratings stimulus for VISp experiment containers
+dsi_exps = boc.get_ophys_experiments(experiment_container_ids=dsi_ec_ids, stimuli=[stim_info.DRIFTING_GRATINGS])
+print("VIP Interneuron drifting gratings ophys experiments: %d" % len(dsi_exps))
+
+
+
+def get_unique_orientations(dg_table):
+
+    pre_ORIs = dg_table['orientation'].unique() 
+    ORIs = [x for x in pre_ORIs if np.isnan(x) == False]
+    return ORIs
+
+def get_unique_temporal_frequencies(dg_table):
+
+    pre_TFs = dg_table['temporal_frequency'].unique()
+    TFs = [x for x in pre_TFs if np.isnan(x) == False]
+    return TFs
+
+def get_condition_trials(dg_table, ori, tf):
+    trials_in_condition = (dg_table['orientation'] == ori) & (dg_table['temporal_frequency'] == tf)
+        
+    condition_trial_indices = np.argwhere(trials_in_condition)
+     
+    just_indices = []
+    for sublist in condition_trial_indices:
+        just_indices.append(sublist[0])
+        
+    return just_indices
+
+def get_blank_trials(dg_table):
+    for ori_idx, current_ori in enumerate(get_unique_orientations(dg_table)):
+        for TF_idx, current_tf in enumerate(get_unique_temporal_frequencies(dg_table)):
+            trials_in_condition = (np.isnan(dg_table['orientation'])) & (np.isnan(dg_table['temporal_frequency']))
+        
+    condition_trial_indices = np.argwhere(trials_in_condition)
+     
+    just_indices = []
+    for sublist in condition_trial_indices:
+        just_indices.append(sublist[0])
+        
+    return just_indices
+
+def get_condition_mean(dg_table,ORIs,TFs,i,j,neuron_number,dg_mean_sweeps):
+    return np.nanmean(dg_mean_sweeps.iloc[get_condition_trials(dg_table, ORIs[i], TFs[j]),neuron_number])
+
+def get_blank_mean(dg_table, neuron_number,dg_mean_sweeps):
+    return np.mean(dg_mean_sweeps.iloc[get_blank_trials(dg_table),neuron_number])
+
+def get_response_matrix(dg_table, current_neuron, dg_mean_sweep_responses):
+    sorted_dg_table = dg_table.sort_values(by=['temporal_frequency','orientation'])
+    all_unique_orientations = get_unique_orientations(sorted_dg_table)
+    all_unique_temporal_frequencies = get_unique_temporal_frequencies(sorted_dg_table)
+    
+    matrix = np.zeros((len(all_unique_orientations), len(all_unique_temporal_frequencies) + 1))
+    matrix[0,0] = get_blank_mean(dg_table, current_neuron, dg_mean_sweep_responses)
+    matrix[1:len(all_unique_orientations),0] = float('nan')
+    
+    for i in range(len(all_unique_orientations)):
+        for j in range(0, len(all_unique_temporal_frequencies)):
+            matrix[i, j+1] = get_condition_mean(dg_table,all_unique_orientations,all_unique_temporal_frequencies,i,j,current_neuron,dg_mean_sweep_responses)
+        
+    return matrix
+
+def get_all_experiment_tuning_curves(exp_array):
+    for cur_exp in range(len(exp_array)):
+        dg_tuning_curve_wip(cur_exp, exp_array)
+
+
+
+def chisq_from_stim_table(stim_table,
+                          columns,
+                          mean_sweep_events,
+                          num_shuffles=1000,
+                          verbose=False):
+    #  stim_table is a pandas DataFrame with len = num_sweeps
+    #  columns is a list of column names that define the categories (e.g. ['Ori','Contrast'])
+    #  mean_sweep_events is a numpy array with shape (num_sweeps,num_cells)
+    
+    sweep_categories = stim_table_to_categories(stim_table,columns,verbose=verbose)
+    p_vals = compute_chi_shuffle(mean_sweep_events,sweep_categories,num_shuffles=num_shuffles)
+    
+    return p_vals
+
+def compute_chi_shuffle(mean_sweep_events,
+                        sweep_categories,
+                        num_shuffles=1000):
+
+    #  mean_sweep_events is a numpy array with shape (num_sweeps,num_cells)
+    #  sweep_conditions is a numpy array with shape (num_sweeps)
+    #       sweep_conditions gives the category label for each sweep
+    
+    (num_sweeps,num_cells) = np.shape(mean_sweep_events) 
+    
+    assert len(sweep_categories) == num_sweeps
+    
+    sweep_categories_dummy = make_category_dummy(sweep_categories)
+    
+    expected = compute_expected(mean_sweep_events,sweep_categories_dummy)
+    observed = compute_observed(mean_sweep_events,sweep_categories_dummy)
+    chi_actual = compute_chi(observed,expected)
+    
+    chi_shuffle = np.zeros((num_cells,num_shuffles))
+    for ns in range(num_shuffles):
+        #print 'shuffle ' + str(ns+1) + ' of ' + str(num_shuffles)
+        
+        shuffle_sweeps = np.random.choice(num_sweeps,size=(num_sweeps,))
+        shuffle_sweep_events = mean_sweep_events[shuffle_sweeps]
+        
+        shuffle_expected = compute_expected(shuffle_sweep_events,sweep_categories_dummy)
+        shuffle_observed = compute_observed(shuffle_sweep_events,sweep_categories_dummy)
+        
+        chi_shuffle[:,ns] = compute_chi(shuffle_observed,shuffle_expected)
+    
+    p_vals = np.mean(chi_actual.reshape(num_cells,1)<chi_shuffle,axis=1)
+    
+    return p_vals
+
+def stim_table_to_categories(stim_table,
+                             columns,
+                             verbose=False):
+    # get the categories for all sweeps with each unique combination of 
+    #   parameters in 'columns' being one category
+    # sweeps with non-finite values in ANY column (e.g. np.NaN) are labeled 
+    #   as blank sweeps (category = -1)
+    
+    num_sweeps = len(stim_table)
+    num_params = len(columns)
+    
+    unique_params = []
+    options_per_column = []
+    max_combination = 1
+    for column in columns:
+        column_params = np.unique(stim_table[column].values)
+        column_params = column_params[np.isfinite(column_params)]
+        unique_params.append(column_params)
+        options_per_column.append(len(column_params))
+        max_combination*=len(column_params)
+
+    category = 0
+    sweep_categories = -1*np.ones((num_sweeps,))
+    curr_combination = np.zeros((num_params,),dtype=np.int)
+    options_per_column = np.array(options_per_column).astype(np.int)
+    all_tried = False
+    while not all_tried:
+        
+        matches_combination = np.ones((num_sweeps,),dtype=np.bool)
+        for i_col,column in enumerate(columns):
+            param = unique_params[i_col][curr_combination[i_col]]
+            matches_param = stim_table[column].values == param
+            matches_combination *= matches_param
+            
+        if np.any(matches_combination):
+            sweep_categories[matches_combination] = category
+            if verbose:
+                print ('Category ' + str(category))
+                for i_col,column in enumerate(columns):
+                    param = unique_params[i_col][curr_combination[i_col]]
+                    print (column + ': ' + str(param))
+            
+            category+=1
+              
+        #advance the combination
+        curr_combination = advance_combination(curr_combination,options_per_column)
+        all_tried = curr_combination[0]==options_per_column[0]
+    
+    if verbose:    
+        blank_sweeps = sweep_categories==-1
+        print ('num blank: ' + str(blank_sweeps.sum()))
+        
+    return sweep_categories
+    
+def advance_combination(curr_combination,
+                        options_per_column):
+    
+    num_cols = len(curr_combination)
+    
+    might_carry = True
+    col = num_cols-1
+    while might_carry:
+        curr_combination[col] += 1
+        if col==0 or curr_combination[col]<options_per_column[col]:
+            might_carry = False
+        else:
+            curr_combination[col] = 0
+            col-=1
+            
+    return curr_combination
+    
+
+def make_category_dummy(sweep_categories):
+    #makes a dummy variable version of the sweep category list
+    
+    num_sweeps = len(sweep_categories)
+    categories = np.unique(sweep_categories)
+    num_categories = len(categories)
+    
+    sweep_category_mat = np.zeros((num_sweeps,num_categories),dtype=np.bool)
+    for i_cat,category in enumerate(categories):
+        category_idx = np.argwhere(sweep_categories==category)[:,0]
+        sweep_category_mat[category_idx,i_cat] = True
+    
+    return sweep_category_mat
+
+def compute_observed(mean_sweep_events,sweep_conditions):
+
+    (num_sweeps,num_conditions) = np.shape(sweep_conditions)
+    num_cells = np.shape(mean_sweep_events)[1]   
+    
+    observed_mat = (mean_sweep_events.T).reshape(num_cells,num_sweeps,1) * sweep_conditions.reshape(1,num_sweeps,num_conditions)
+    observed = np.sum(observed_mat,axis=1)
+    
+    return observed
+    
+def compute_expected(mean_sweep_events,sweep_conditions):   
+    
+    num_conditions = np.shape(sweep_conditions)[1]
+    num_cells = np.shape(mean_sweep_events)[1]
+    
+    sweeps_per_condition = np.sum(sweep_conditions,axis=0)
+    events_per_sweep = np.mean(mean_sweep_events,axis=0)
+    
+    expected = sweeps_per_condition.reshape(1,num_conditions) * events_per_sweep.reshape(num_cells,1) 
+    
+    return expected
+
+def compute_chi(observed,expected):
+
+    chi = (observed - expected) ** 2 /expected
+    chi = np.where(expected>0,chi,0.0)  
+    return np.sum(chi,axis=1)
+
+def dg_tuning_curve_wip(exp_number, exp_array): 
+    
+    dsi_cell = exp_array.iloc[exp_number]
+    cell_exp = boc.get_ophys_experiments(cell_specimen_ids=[dsi_cell['cell_specimen_id']],stimuli=[stim_info.DRIFTING_GRATINGS])[0]
+    data_set = boc.get_ophys_experiment_data(cell_exp['id'])
+
+    dg = DriftingGratings(data_set)
+    dg_peak = dg.peak
+    
+    
+    dg_tbl = data_set.get_stimulus_table("drifting_gratings")
+    dg_columns = list(dg_tbl.columns)
+    dg_mean_sweep_events = dg.mean_sweep_response.iloc[:,:-1]
+    total_neurons = len(dg_mean_sweep_events.columns)
+#    p_vals = chisq_from_stim_table(dg_table, dg_columns, dg_mean_sweep_events, num_shuffles=1000, verbose=False)
+
+    for cur_neuron in range(total_neurons):
+        #Get Response Matrix
+        response_matrix = get_response_matrix(dg_tbl, cur_neuron, dg_mean_sweep_events)
+
+
+        #find normalized response
+        blank = response_matrix[0,0]
+        normalized_response = (response_matrix - blank) / (np.nanmean(response_matrix) + blank)
+        #(Response(d,tf) – Response(Blank)) / (mean Response(all d and tf) + R(Blank))
+
+
+        fig, ax2  = plt.subplots()
+
+        # plot orientation selectivity
+        im = ax2.imshow(normalized_response, cmap='RdBu_r', interpolation='nearest')
+        ax2.set_xlabel('temporal frequency')
+        ax2.set_ylabel('orientation')
+        ax2.set_xticks(np.arange(len(dg.tfvals)-1))
+        ax2.set_xticklabels(dg.tfvals[1:])
+        ax2.set_yticks(np.arange(len(dg.orivals)))
+        ax2.set_yticklabels(dg.orivals)
+        ax2.set_title('orientation selective cells p = ')
+        # + str(p_vals))
+
+        # plot a colorbar
+        fig.subplots_adjust(right=0.9)
+        cbar_ax = fig.add_axes([0.95, 0.05, 0.05, 0.85])
+        cbar = fig.colorbar(im, cax=cbar_ax)
+
+
+        plt.savefig('tuning_graph_images/experiment' + str(exp_number) + '_neuron' + str(cur_neuron) + '_tuning_graph.png', transparent=True)
+        plt.show()
+
+
+#plot tuning curve for all cells in given experiment (experiment = 5)
+dg_tuning_curve_wip(5, dsi_cells)
+
+#plot tuning curve for all cells in all experiments from given experiment array (experiment array = dsi_cell experiments)
+get_all_experiment_tuning_curves(dsi_cells)
