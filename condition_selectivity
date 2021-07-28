@@ -47,7 +47,7 @@ visrl_ecs = boc.get_experiment_containers(targeted_structures=['VISrl'])
 print("all VISrl experiment containers: %d" % len(visrl_ecs))
 
 
-
+#Example session download for testing purposes 
 session_id0 = exp_test[0]['id']
 print(session_id0)
 
@@ -60,32 +60,17 @@ drifting_gratings_table0
 
 
 
-vip_inter_ecs = boc.get_experiment_containers(cre_lines=['VI-IRES-Cre'])
-# Download cells for a set of experiments and convert to DataFrame
-cells = boc.get_cell_specimens()
-cells = pd.DataFrame.from_records(cells)
-print("total cells: %d" % len(cells))
-
-# find direction selective cells in VISp
-vip_inter_ec_ids = [ ec['id'] for ec in vip_inter_ecs ]
-vip_inter_cells = cells[cells['experiment_container_id'].isin(vip_inter_ec_ids)]
-print("VIP Interneuron cells: %d" % len(vip_inter_cells))
-
-# significant response to drifting gratings stimulus
-sig_cells = vip_inter_cells[vip_inter_cells['p_dg'] < 0.05]
-print("cells with sig. response to drifting gratings: %d" % len(sig_cells))
-
-# direction selective cells
-dsi_cells = sig_cells[(sig_cells['g_dsi_dg'] > 0.9)]
-print("direction-selective cells: %d" % len(dsi_cells))
-
-# find experiment containers for those cells
-dsi_ec_ids = dsi_cells['experiment_container_id'].unique()
-print("total dsi experiment containers: %d" % len(dsi_ec_ids))
-
-# Download the ophys experiments containing the drifting gratings stimulus for VISp experiment containers
-dsi_exps = boc.get_ophys_experiments(experiment_container_ids=dsi_ec_ids, stimuli=[stim_info.DRIFTING_GRATINGS])
-print("VIP Interneuron drifting gratings ophys experiments: %d" % len(dsi_exps))
+#function to get lower and upper limit of values in null distribution bootstrap
+def null_distribution_bootstrap(num_shuffles, cell_responses, total_neurons, avg): 
+    shuffle_dist =  np.zeros(num_shuffles)
+    for i_shuffle in range(num_shuffles):
+        shuffle_dist[i_shuffle] = np.mean(cell_responses[np.random.choice(total_neurons,size=(total_neurons,))])
+        
+    low_lim = [np.percentile(shuffle_dist, 2.5)] #- np.array([avg])
+    up_lim = [np.percentile(shuffle_dist, 97.5)] #- np.array([avg])
+    lims = np.ndarray.flatten(np.absolute(np.vstack((low_lim, up_lim))))
+       
+    return lims
 
 
 
@@ -131,19 +116,13 @@ def get_condition_mean(dg_table,ORIs,TFs,i,j,neuron_number,dg_mean_sweeps):
 def get_blank_mean(dg_table, neuron_number,dg_mean_sweeps):
     return np.mean(dg_mean_sweeps.iloc[get_blank_trials(dg_table),neuron_number])
 
+#returns response matrix for a given neuron for all tf and ori conditions given its dg table and above helper functions
 def get_response_matrix(dg_table, current_neuron, dg_mean_sweep_responses, threshold):
     sorted_dg_table = dg_table.sort_values(by=['temporal_frequency','orientation'])
     all_unique_orientations = get_unique_orientations(sorted_dg_table)
     all_unique_temporal_frequencies = get_unique_temporal_frequencies(sorted_dg_table)
     
-#     pre_matrix = np.zeros((len(all_unique_orientations), len(all_unique_temporal_frequencies)))
-    
-#     for i in range(len(all_unique_orientations)):
-#         for j in range(0, len(all_unique_temporal_frequencies)):
-#             cur_condition_response = get_condition_mean(dg_table,all_unique_orientations,all_unique_temporal_frequencies,i,j,current_neuron,dg_mean_sweep_responses)
-#             if cur_condition_response <= threshold:
-#                 pre_matrix[i, j] = 1
-                
+
     matrix = np.zeros(len(all_unique_temporal_frequencies))
     
     for i in range(len(all_unique_orientations)):
@@ -151,11 +130,10 @@ def get_response_matrix(dg_table, current_neuron, dg_mean_sweep_responses, thres
             cur_condition_response = get_condition_mean(dg_table,all_unique_orientations,all_unique_temporal_frequencies,i,j,current_neuron,dg_mean_sweep_responses)
             if cur_condition_response <= threshold:
                 matrix[j] = matrix[j] + 1
-    
-    
                 
     return matrix
 
+#used to get upper and lower lim for error bar plots
 def bootstrap(num_shuffles, cell_responses, total_neurons, ori_idx, avg): 
     shuffle_dist =  np.zeros(num_shuffles)
     for i_shuffle in range(num_shuffles):
@@ -166,21 +144,7 @@ def bootstrap(num_shuffles, cell_responses, total_neurons, ori_idx, avg):
        
     return np.ndarray.flatten(np.absolute(np.vstack((low_lim, up_lim))))
 
-# cell_responses = [1,2,3,3,3,4,5,6,7,7,7,8]
-# cell_responses
-
-# np.mean(cell_responses[np.random.choice(total_neurons,size=(total_neurons,))])
-
-def get_first_ten_experiment_tuning_curves(exp_array):
-    for cur_exp in range(10):
-        dg_tuning_curve_wip(cur_exp, exp_array)
-
-def get_all_experiment_tuning_curves(exp_array):
-    for cur_exp in range(len(exp_array)):
-        dg_tuning_curve_wip(cur_exp, exp_array)
-
-
-
+#Dan's chi square function to perform statistical p-test
 def chisq_from_stim_table(stim_table,
                           columns,
                           mean_sweep_events,
@@ -343,74 +307,17 @@ def compute_chi(observed,expected):
     chi = np.where(expected>0,chi,0.0)  
     return np.sum(chi,axis=1)
 
-def dg_tuning_curve_wip(exp_number, exp_array): 
+
+#gets all neuron responses within a given creline and puts them ina matrix
+def get_all_experiment_neurons(cre):
     
-    dsi_cell = exp_array.iloc[exp_number]
-    cell_exp = boc.get_ophys_experiments(cell_specimen_ids=[dsi_cell['cell_specimen_id']],stimuli=[stim_info.DRIFTING_GRATINGS])[0]
-    data_set = boc.get_ophys_experiment_data(cell_exp['id'])
-
-    dg = DriftingGratings(data_set)
-    dg_peak = dg.peak
+    og_arr  = np.empty((0, (len(dg0.tfvals) - 1)), int)
+    TF_SbC_tuning = np.array(og_arr).T   
+    cell_exp = boc.get_ophys_experiments(cre_lines=[cre], stimuli=[stim_info.DRIFTING_GRATINGS])
     
-    dg_tbl = data_set.get_stimulus_table("drifting_gratings")
-    dg_columns = list(dg_tbl.columns[0:2])
-    dg_mean_sweep_events = dg.mean_sweep_response.iloc[:,:-1]
-    total_neurons = dg_mean_sweep_events.shape[1]
-    threshold = 0
-    p_vals = chisq_from_stim_table(dg_tbl, dg_columns, dg_mean_sweep_events.values, num_shuffles=1000, verbose=False)
-    all_cell_responses =  np.zeros(((len(dg.tfvals) - 1), total_neurons))
-    num_shuffles = 1000
+    for i_exp in cell_exp:
 
-    
-   
-        #all_cell_responses = all_cell_responses + response_matrix
-        
-    #avg_cell_responses = all_cell_responses / total_neurons
-
-
-    for cur_neuron in range(total_neurons):
-        #Get Response Matrix
-        response_matrix = get_response_matrix(dg_tbl, cur_neuron, dg_mean_sweep_events, threshold)        
-        all_cell_responses[:,cur_neuron] = response_matrix
-        
-        avg_cell_responses = np.zeros(len(dg.tfvals) - 1)
-        bootstraps = np.zeros((2, (len(dg.tfvals) - 1)))
-
-        
-
-
-    for i_ori in range((len(dg.tfvals) - 1)):
-        avg_cell_responses[i_ori]=np.mean(all_cell_responses[i_ori,:])
-        bootstraps[:,i_ori] = bootstrap(num_shuffles, all_cell_responses, total_neurons, i_ori, avg_cell_responses[i_ori])
-#it wont accept all_cell_responses[i_ori] because bootstrap function breaks when given single array, 
-#needs to take single row of 2d matrix
-
-    fig, ax2  = plt.subplots()
-    #print(str(bootstraps))
-    # plot orientation selectivity
-    ax2.errorbar(dg.tfvals[1:],avg_cell_responses, yerr=bootstraps, ecolor='black')
-    ax2.set_xlabel('Temporal Frequencies')
-    ax2.set_ylabel('Negative Reponse Orientations')
-    ax2.set_xticks(dg.tfvals)
-    ax2.set_xticklabels(dg.tfvals)
-    ax2.set_yticks(np.arange(len(dg.orivals)+1))
-    ax2.set_yticklabels(range(len(dg.orivals) + 1))
-    ax2.set_title('Average Error Bar Plot of Negative Orientation Selective Cell Responses')
-
-    plt.savefig('tuning_graph_images/VIP_threshold_selectivity/threshold_error_bar_plot.png', transparent=True)
-    #plt.savefig('tuning_graph_images/experiment' + str(exp_number) + '/neuron' + str(cur_neuron) + '_tuning_graph.png', transparent=True)
-    plt.show
-
-
-
-def get_all_experiment_neurons(exp_array): 
-    ogArr = []
-    for i_exp in exp_array:
-    
-        dsi_cell = exp_array[i_exp]
-        cell_exp = boc.get_ophys_experiments(cell_specimen_ids=[dsi_cell['cell_specimen_id']],stimuli=[stim_info.DRIFTING_GRATINGS])[0]
-        data_set = boc.get_ophys_experiment_data(cell_exp['id'])
-
+        data_set = boc.get_ophys_experiment_data(i_exp['id'])
         dg = DriftingGratings(data_set)
         dg_peak = dg.peak
 
@@ -419,26 +326,60 @@ def get_all_experiment_neurons(exp_array):
         dg_mean_sweep_events = dg.mean_sweep_response.iloc[:,:-1]
         total_neurons = dg_mean_sweep_events.shape[1]
         threshold = 0
-        p_vals = chisq_from_stim_table(dg_tbl, dg_columns, dg_mean_sweep_events.values, num_shuffles=1000, verbose=False)
         all_cell_responses =  np.zeros(((len(dg.tfvals) - 1), total_neurons))
-        num_shuffles = 1000
 
         for cur_neuron in range(total_neurons):
             #Get Response Matrix
             response_matrix = get_response_matrix(dg_tbl, cur_neuron, dg_mean_sweep_events, threshold)        
             all_cell_responses[:,cur_neuron] = response_matrix
-        
-        ogArr = np.append(ogArr, all_cell_responses, axis=1)
-        
-    return ogArr
 
-def dg_tuning_curve(exp_array): 
-    all_neuron_responses = get_all_experiment_neurons(exp_array)
+        TF_SbC_tuning = np.append(TF_SbC_tuning, all_cell_responses, axis=1)
+
+    return TF_SbC_tuning
+
+
+#gets all neurons responses within a given cre line and averages them according to experiment
+def get_all_experiment_averages(cre):
     
-    avg_cell_responses = np.zeros(len(dg.tfvals) - 1)
-    bootstraps = np.zeros((2, (len(dg.tfvals) - 1)))
+    og_arr  = np.empty((0, (len(dg0.tfvals) - 1)), int)
+    TF_SbC_tuning = np.array(og_arr).T   
+    cell_exp = boc.get_ophys_experiments(cre_lines=[cre], stimuli=[stim_info.DRIFTING_GRATINGS])
+    
+    for i_exp in cell_exp:
 
-    for i_ori in range((len(dg.tfvals) - 1)):
+        data_set = boc.get_ophys_experiment_data(i_exp['id'])
+        dg = DriftingGratings(data_set)
+        dg_peak = dg.peak
+
+        dg_tbl = data_set.get_stimulus_table("drifting_gratings")
+        dg_columns = list(dg_tbl.columns[0:2])
+        dg_mean_sweep_events = dg.mean_sweep_response.iloc[:,:-1]
+        total_neurons = dg_mean_sweep_events.shape[1]
+        threshold = 0
+        all_cell_responses =  np.zeros(((len(dg.tfvals) - 1), total_neurons))
+
+        for cur_neuron in range(total_neurons):
+            #Get Response Matrix
+            response_matrix = get_response_matrix(dg_tbl, cur_neuron, dg_mean_sweep_events, threshold)        
+            all_cell_responses[:,cur_neuron] = response_matrix
+            
+        all_exp_averages = np.mean(all_cell_responses, axis=1)
+        TF_SbC_tuning = np.append(TF_SbC_tuning, all_exp_averages.reshape(5, 1), axis=1)
+
+    return TF_SbC_tuning
+
+
+#computes error bar plot based on cell responses or average experiment responses
+def dg_tuning_curve(all_neuron_responses, cre): 
+    #all_neuron_responses = get_all_experiment_neurons(exp_array)
+    name = cre[:3]
+    avg_cell_responses = np.zeros((len(dg0.tfvals) - 1))
+    bootstraps = np.zeros((2, (len(dg0.tfvals) - 1)))
+    num_shuffles = 1000
+    total_neurons = all_neuron_responses.shape[1]
+
+
+    for i_ori in range((len(dg0.tfvals) - 1)):
         avg_cell_responses[i_ori]=np.mean(all_neuron_responses[i_ori,:])
         bootstraps[:,i_ori] = bootstrap(num_shuffles, all_neuron_responses, total_neurons, i_ori, avg_cell_responses[i_ori])
     #it wont accept all_cell_responses[i_ori] because bootstrap function breaks when given single array, 
@@ -447,22 +388,48 @@ def dg_tuning_curve(exp_array):
     fig, ax2  = plt.subplots()
     #print(str(bootstraps))
     # plot orientation selectivity
-    ax2.errorbar(dg.tfvals[1:],avg_cell_responses, yerr=bootstraps, ecolor='black')
+    normalized_x = np.log(dg0.tfvals[1:])
+    ax2.errorbar(normalized_x, avg_cell_responses, yerr=bootstraps, ecolor='black')
     ax2.set_xlabel('Temporal Frequencies')
     ax2.set_ylabel('Negative Reponse Orientations')
-    ax2.set_xticks(dg.tfvals)
-    ax2.set_xticklabels(dg.tfvals)
-    ax2.set_yticks(np.arange(len(dg.orivals)+1))
-    ax2.set_yticklabels(range(len(dg.orivals) + 1))
-    ax2.set_title('Average Error Bar Plot of Negative Orientation Selective Cell Responses')
-    all_neuron_responses
+    ax2.set_xticks(normalized_x)
+    ax2.set_xticklabels(dg0.tfvals[1:])
+    ax2.set_yticks(np.arange(len(dg0.orivals)+1))
+    ax2.set_yticklabels(range(len(dg0.orivals) + 1))
     
-    plt.savefig('tuning_graph_images/VIP_threshold_selectivity/threshold_error_bar_plot.png', transparent=True)
+#     ax2.set_title(name + ' Average Error Bar Plot of Negative Orientation Selective Cell Responses')
+#     plt.savefig('tuning_graph_images/' + name + '_threshold_selectivity/threshold_error_bar_plot.png', transparent=True)
+    
+    ax2.set_title(name + ' Average Error Bar Plot of Suppressed Experiment Responses')
+    plt.savefig('tuning_graph_images/' + name + '_threshold_selectivity/threshold_experiment_error_bar_plot.png', transparent=True)
+   
     #plt.savefig('tuning_graph_images/experiment' + str(exp_number) + '/neuron' + str(cur_neuron) + '_tuning_graph.png', transparent=True)
     plt.show
 
 
-#plot tuning curve for all cells in given experiment (experiment = 5)
-dg_tuning_curve_wip(5, dsi_cells)
+#define cre lines
+vip_cre = 'VIP-IRES-Cre'
+sst_cre = 'Sst-IRES-Cre'
+cux2_cre = 'Cux2-CreERT2'
 
-get_all_experiment_neurons(dsi_cells)
+#computes respective cell responose and experiment response average matrices for each creline
+all_vip_cells = get_all_experiment_neurons(vip_cre)
+all_vip_averages = get_all_experiment_averages(vip_cre)
+
+all_cux2_cells = get_all_experiment_neurons(cux2_cre)
+all_cux2_averages = get_all_experiment_averages(cux2_cre)
+
+all_sst_cells = get_all_experiment_neurons(sst_cre)
+all_sst_averages = get_all_experiment_averages(sst_cre)
+
+
+
+#computes error bar plots for cell responose and experiment response average matrices for each creline
+dg_tuning_curve(all_vip_cells, vip_cre)
+dg_tuning_curve(all_vip_averages, vip_cre)
+
+dg_tuning_curve(all_cux2_cells, cux2_cre)
+dg_tuning_curve(all_cux2_averages, cux2_cre)
+
+dg_tuning_curve(all_sst_cells, sst_cre)
+dg_tuning_curve(all_sst_averages, sst_cre)
